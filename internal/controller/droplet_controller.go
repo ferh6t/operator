@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,9 +35,9 @@ type DropletReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=webapp.my.domain,resources=droplets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=webapp.my.domain,resources=droplets/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=webapp.my.domain,resources=droplets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=droplets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=droplets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=droplets/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -47,9 +49,26 @@ type DropletReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *DropletReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	l := logf.FromContext(ctx)
+	l.Info("Reconciling Droplet")
 
-	// TODO(user): your logic here
+	dropletObject := &webappv1.Droplet{}
+	if err := r.Get(ctx, req.NamespacedName, dropletObject); err != nil {
+		if apierrors.IsNotFound(err) {
+			l.Info("Droplet not found, ignoring since object must be deleted")
+			return ctrl.Result{}, nil
+		}
+		l.Error(err, "Failed to get Droplet")
+		return ctrl.Result{}, err
+	}
+
+	fmt.Println("I got request namespace:", req.Namespace, "name:", req.Name)
+	fmt.Println("droplet instance name:", dropletObject.Name)
+	fmt.Println("droplet namespace:", dropletObject.Namespace)
+	fmt.Println("droplet generation:", dropletObject.Generation)
+	fmt.Println("droplet labels:", dropletObject.Labels)
+	fmt.Printf("droplet spec: %+v\n", dropletObject.Spec)
+	fmt.Printf("droplet status: %+v\n", dropletObject.Status)
 
 	return ctrl.Result{}, nil
 }

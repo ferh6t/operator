@@ -2,7 +2,7 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/webapp.my.domain_droplets.yaml
+- bases/webapp.ferh6t.github.io_droplets.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

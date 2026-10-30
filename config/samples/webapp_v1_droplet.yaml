@@ -1,4 +1,4 @@
-apiVersion: webapp.my.domain/v1
+apiVersion: webapp.ferh6t.github.io/v1
 kind: Droplet
 metadata:
   labels:

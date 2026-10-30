@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.22.0
-  name: droplets.webapp.my.domain
+  name: droplets.webapp.ferh6t.github.io
 spec:
-  group: webapp.my.domain
+  group: webapp.ferh6t.github.io
   names:
     kind: Droplet
     listKind: DropletList
