@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -70,7 +71,8 @@ func (r *DropletReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	fmt.Printf("droplet spec: %+v\n", dropletObject.Spec)
 	fmt.Printf("droplet status: %+v\n", dropletObject.Status)
 
-	return ctrl.Result{}, nil
+	// Check the Droplet again every 10 seconds, even without changes
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

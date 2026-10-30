@@ -9,8 +9,8 @@ spec:
   region: fra1
   size: s-1vcpu-1gb
   image: ubuntu-24-04-x64
-  sshKeys:
-    - "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+  # Filled from .env by `make apply-sample`
+  sshKeys: ${DO_SSH_KEYS}
   ipv6: true
   monitoring: true
   tags:
