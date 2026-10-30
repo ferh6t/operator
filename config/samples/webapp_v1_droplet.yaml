@@ -1,0 +1,24 @@
+apiVersion: webapp.my.domain/v1
+kind: Droplet
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: droplet-sample
+spec:
+  region: fra1
+  size: s-1vcpu-1gb
+  image: ubuntu-24-04-x64
+  sshKeys:
+    - "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+  ipv6: true
+  monitoring: true
+  tags:
+    - k8s-managed
+  userData: |
+    #cloud-config
+    packages:
+      - nginx
+  tokenSecretRef:
+    name: digitalocean-token
+    key: token

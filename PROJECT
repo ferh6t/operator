@@ -15,7 +15,7 @@ resources:
   controller: true
   domain: my.domain
   group: webapp
-  kind: Guestbook
+  kind: Droplet
   path: my.domain/guestbook/api/v1
   version: v1
 version: "3"

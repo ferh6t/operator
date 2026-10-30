@@ -30,7 +30,7 @@ import (
 	webappv1 "my.domain/guestbook/api/v1"
 )
 
-var _ = Describe("Guestbook Controller", func() {
+var _ = Describe("Droplet Controller", func() {
 	Context("When reconciling a resource", func() {
 		const (
 			resourceName      = "test-resource"
@@ -43,18 +43,23 @@ var _ = Describe("Guestbook Controller", func() {
 			Name:      resourceName,
 			Namespace: resourceNamespace,
 		}
-		guestbook := &webappv1.Guestbook{}
+		droplet := &webappv1.Droplet{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind Guestbook")
-			err := k8sClient.Get(ctx, typeNamespacedName, guestbook)
+			By("creating the custom resource for the Kind Droplet")
+			err := k8sClient.Get(ctx, typeNamespacedName, droplet)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &webappv1.Guestbook{
+				resource := &webappv1.Droplet{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: webappv1.DropletSpec{
+						Region:         "fra1",
+						Size:           "s-1vcpu-1gb",
+						Image:          "ubuntu-24-04-x64",
+						TokenSecretRef: webappv1.SecretKeyReference{Name: "digitalocean-token"},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
@@ -62,16 +67,16 @@ var _ = Describe("Guestbook Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &webappv1.Guestbook{}
+			resource := &webappv1.Droplet{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance Guestbook")
+			By("Cleanup the specific resource instance Droplet")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &GuestbookReconciler{
+			controllerReconciler := &DropletReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

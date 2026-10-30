@@ -11,12 +11,12 @@ metadata:
   labels:
     app.kubernetes.io/name: operator
     app.kubernetes.io/managed-by: kustomize
-  name: guestbook-editor-role
+  name: droplet-editor-role
 rules:
 - apiGroups:
   - webapp.my.domain
   resources:
-  - guestbooks
+  - droplets
   verbs:
   - create
   - delete
@@ -28,6 +28,6 @@ rules:
 - apiGroups:
   - webapp.my.domain
   resources:
-  - guestbooks/status
+  - droplets/status
   verbs:
   - get
