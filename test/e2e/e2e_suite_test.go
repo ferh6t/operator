@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"my.domain/guestbook/test/utils"
+	"github.com/ferh6t/operator/test/utils"
 )
 
 var (

@@ -1,4 +1,4 @@
-module my.domain/guestbook
+module github.com/ferh6t/operator
 
 go 1.26.0
 

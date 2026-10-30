@@ -35,8 +35,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	webappv1 "my.domain/guestbook/api/v1"
-	"my.domain/guestbook/internal/controller"
+	webappv1 "github.com/ferh6t/operator/api/v1"
+	"github.com/ferh6t/operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 
