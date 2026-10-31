@@ -31,3 +31,4 @@ go.work
 
 # Local secrets
 .env
+__debug_bin*
