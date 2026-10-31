@@ -37,6 +37,7 @@ import (
 
 	webappv1 "github.com/ferh6t/operator/api/v1"
 	"github.com/ferh6t/operator/internal/controller"
+	"github.com/ferh6t/operator/internal/ui"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -60,12 +61,14 @@ func main() {
 	var webhookPort int
 	var enableLeaderElection bool
 	var probeAddr string
+	var uiAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&uiAddr, "ui-bind-address", ":8082", "The address the dashboard binds to. Use 0 to disable it.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -182,14 +185,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	tracker := ui.NewTracker()
 	if err := (&controller.DropletReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Tracker: tracker,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "droplet")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	if uiAddr != "0" {
+		if err := mgr.Add(&ui.Server{Addr: uiAddr, Reader: mgr.GetClient(), Tracker: tracker}); err != nil {
+			setupLog.Error(err, "Failed to add dashboard")
+			os.Exit(1)
+		}
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

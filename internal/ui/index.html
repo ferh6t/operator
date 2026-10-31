@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Droplet Reconciler</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #646b78; --line: #e3e6eb;
+    --accent: #0069ff; --ok: #138a4b; --ok-bg: #e5f5ec; --warn: #a86400; --warn-bg: #fdf1dc;
+    --bad: #c22c2c; --bad-bg: #fbe7e7; --idle: #646b78; --idle-bg: #eef0f3;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a20; --text: #e7e9ee; --muted: #9aa1ad; --line: #272b33;
+      --accent: #4d94ff; --ok: #4cc98a; --ok-bg: #12291d; --warn: #f0b252; --warn-bg: #2d220f;
+      --bad: #ff7a7a; --bad-bg: #321515; --idle: #9aa1ad; --idle-bg: #22262e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 16px 24px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .live { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  .dot.off { background: var(--bad); }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 40px; display: grid; gap: 20px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .panel h2 { font-size: 13px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line);
+              font-weight: 600; display: flex; justify-content: space-between; }
+  .panel h2 span { color: var(--muted); font-weight: 400; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr.row { cursor: pointer; }
+  tbody tr.row:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  tbody tr.row.sel td { background: color-mix(in srgb, var(--accent) 11%, transparent); }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .muted { color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; }
+  .pill.ok { color: var(--ok); background: var(--ok-bg); }
+  .pill.warn { color: var(--warn); background: var(--warn-bg); }
+  .pill.bad { color: var(--bad); background: var(--bad-bg); }
+  .pill.idle { color: var(--idle); background: var(--idle-bg); }
+  .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
+  .grid2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 20px; align-items: start; }
+  .detail { padding: 14px 16px; display: grid; gap: 14px; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 6px 12px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .cond { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; }
+  .cond .top { display: flex; gap: 8px; align-items: center; }
+  pre { margin: 0; padding: 10px 12px; background: var(--bg); border-radius: 8px; overflow: auto;
+        font: 12px/1.5 var(--mono); max-height: 180px; }
+  .events { max-height: 520px; overflow-y: auto; }
+  .ev { padding: 9px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 2px; }
+  .ev:last-child { border-bottom: 0; }
+  .ev .line { display: flex; gap: 8px; align-items: center; }
+  .ev .err { color: var(--bad); font-size: 12.5px; overflow-wrap: anywhere; }
+  .banner { padding: 10px 14px; border-radius: 8px; background: var(--bad-bg); color: var(--bad); }
+  @media (max-width: 900px) {
+    .grid2 { grid-template-columns: 1fr; }
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    main, header { padding-left: 16px; padding-right: 16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Droplet Reconciler</h1>
+  <div class="live"><span class="dot" id="dot"></span><span id="liveText">Connecting…</span></div>
+</header>
+<main>
+  <div id="banner"></div>
+  <section class="tiles">
+    <div class="tile"><div class="label">Droplets</div><div class="value" id="tDroplets">–</div></div>
+    <div class="tile"><div class="label">Available</div><div class="value" id="tAvailable">–</div></div>
+    <div class="tile"><div class="label">Reconciles</div><div class="value" id="tTotal">–</div></div>
+    <div class="tile"><div class="label">Failed reconciles</div><div class="value" id="tFailed">–</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Droplets <span>click a row for details</span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Name</th><th>Namespace</th><th>Region</th><th>Size</th><th>State</th>
+          <th>Public IP</th><th>Ready</th><th>Last reconcile</th><th>Result</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="panel">
+      <h2>Details <span id="detailName"></span></h2>
+      <div id="detail" class="detail"><div class="empty">Select a Droplet</div></div>
+    </div>
+    <div class="panel">
+      <h2>Reconcile activity <span>newest first</span></h2>
+      <div id="events" class="events"><div class="empty">No reconciles yet</div></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let selected = null;
+let skew = 0; // server clock minus browser clock, in ms
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function ago(t) {
+  if (!t) return "–";
+  const s = Math.max(0, Math.round((Date.now() + skew - new Date(t)) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+const ms = ns => ns >= 1e9 ? (ns / 1e9).toFixed(1) + "s" : Math.round(ns / 1e6) + "ms";
+
+function cond(d, type) {
+  return (d.status.conditions || []).find(c => c.type === type);
+}
+
+function statePill(d) {
+  if (d.deleting) return '<span class="pill warn">deleting</span>';
+  const s = d.status.state;
+  if (!s) return cond(d, "Degraded")?.status === "True"
+    ? '<span class="pill bad">error</span>' : '<span class="pill idle">pending</span>';
+  const cls = s === "active" ? "ok" : s === "new" ? "warn" : s === "off" ? "bad" : "idle";
+  return `<span class="pill ${cls}">${esc(s)}</span>`;
+}
+
+function readyPill(d) {
+  const a = cond(d, "Available");
+  if (!a) return '<span class="muted">–</span>';
+  return a.status === "True" ? '<span class="pill ok">True</span>'
+    : `<span class="pill ${a.status === "False" ? "warn" : "idle"}">${esc(a.status)}</span>`;
+}
+
+function resultPill(e) {
+  if (!e) return '<span class="muted">–</span>';
+  return e.error ? '<span class="pill bad">error</span>' : '<span class="pill ok">ok</span>';
+}
+
+function renderRows(list) {
+  const key = d => d.namespace + "/" + d.name;
+  if (!list.length) {
+    $("rows").innerHTML = '<tr><td colspan="9" class="empty">No Droplets. Try <span class="mono">make apply-sample</span></td></tr>';
+    return;
+  }
+  if (!selected || !list.some(d => key(d) === selected)) selected = key(list[0]);
+  $("rows").innerHTML = list.map(d => `
+    <tr class="row ${key(d) === selected ? "sel" : ""}" data-key="${esc(key(d))}">
+      <td><strong>${esc(d.name)}</strong></td>
+      <td class="muted">${esc(d.namespace)}</td>
+      <td>${esc(d.spec.region)}</td>
+      <td class="mono">${esc(d.spec.size)}</td>
+      <td>${statePill(d)}</td>
+      <td class="mono">${esc(d.status.publicIPv4) || '<span class="muted">–</span>'}</td>
+      <td>${readyPill(d)}</td>
+      <td class="muted">${ago(d.lastReconcile?.time)}</td>
+      <td>${resultPill(d.lastReconcile)}</td>
+    </tr>`).join("");
+}
+
+function renderDetail(list) {
+  const d = list.find(x => x.namespace + "/" + x.name === selected);
+  if (!d) { $("detail").innerHTML = '<div class="empty">Select a Droplet</div>'; $("detailName").textContent = ""; return; }
+  $("detailName").textContent = d.namespace + "/" + d.name;
+  const s = d.spec, st = d.status;
+  const row = (k, v) => `<dt>${k}</dt><dd>${v || '<span class="muted">–</span>'}</dd>`;
+  const conds = (st.conditions || []).map(c => `
+    <div class="cond">
+      <div class="top"><strong>${esc(c.type)}</strong>
+        <span class="pill ${c.status === "True" ? (c.type === "Degraded" ? "bad" : "ok") : "idle"}">${esc(c.status)}</span>
+        <span class="muted">${esc(c.reason)} · ${ago(c.lastTransitionTime)}</span></div>
+      <div class="muted">${esc(c.message)}</div>
+    </div>`).join("") || '<div class="muted">No conditions yet</div>';
+  const lr = d.lastReconcile;
+  $("detail").innerHTML = `
+    <dl class="kv">
+      ${row("DigitalOcean ID", st.id ? `<span class="mono">${st.id}</span>` : "")}
+      ${row("Image", `<span class="mono">${esc(s.image)}</span>`)}
+      ${row("Private IP", `<span class="mono">${esc(st.privateIPv4)}</span>`)}
+      ${row("IPv6", `<span class="mono">${esc(st.publicIPv6)}</span>`)}
+      ${row("Generation", `${d.generation} <span class="muted">(observed ${st.observedGeneration ?? 0})</span>`)}
+      ${row("Created in DO", st.createdAt ? ago(st.createdAt) : "")}
+      ${row("Tags", esc((s.tags || []).join(", ")))}
+      ${row("SSH keys", esc((s.sshKeys || []).length + " key(s)"))}
+      ${row("Token Secret", `<span class="mono">${esc(s.tokenSecretRef?.name)}</span>`)}
+      ${row("Last reconcile", lr ? `${ago(lr.time)} · took ${ms(lr.durationNs)}${lr.requeueInNs ? " · next in " + ms(lr.requeueInNs) : ""}` : "")}
+    </dl>
+    ${lr?.error ? `<div class="banner">${esc(lr.error)}</div>` : ""}
+    <div style="display:grid;gap:8px">${conds}</div>
+    ${s.userData ? `<div><div class="muted" style="margin-bottom:6px">userData</div><pre>${esc(s.userData)}</pre></div>` : ""}`;
+}
+
+function renderEvents(events) {
+  if (!events.length) { $("events").innerHTML = '<div class="empty">No reconciles yet</div>'; return; }
+  $("events").innerHTML = events.slice(0, 100).map(e => `
+    <div class="ev">
+      <div class="line">${resultPill(e)}<strong>${esc(e.namespace)}/${esc(e.name)}</strong>
+        <span class="muted">gen ${e.generation} · ${ms(e.durationNs)} · ${ago(e.time)}</span></div>
+      ${e.error ? `<div class="err">${esc(e.error)}</div>` : ""}
+    </div>`).join("");
+}
+
+async function tick() {
+  try {
+    const res = await fetch("/api/state", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    skew = new Date(data.now) - Date.now();
+    $("dot").classList.remove("off");
+    $("liveText").textContent = "Live · updated " + new Date().toLocaleTimeString();
+    $("banner").innerHTML = data.listError
+      ? `<div class="banner">Could not list Droplets: ${esc(data.listError)}</div>` : "";
+    $("tDroplets").textContent = data.droplets.length;
+    $("tAvailable").textContent = data.droplets.filter(d => cond(d, "Available")?.status === "True").length;
+    $("tTotal").textContent = data.totalReconciles;
+    $("tFailed").textContent = data.failedReconciles;
+    renderRows(data.droplets);
+    renderDetail(data.droplets);
+    renderEvents(data.events);
+  } catch (err) {
+    $("dot").classList.add("off");
+    $("liveText").textContent = "Disconnected: is the controller running?";
+  }
+}
+
+$("rows").addEventListener("click", e => {
+  const tr = e.target.closest("tr.row");
+  if (!tr) return;
+  selected = tr.dataset.key;
+  tick();
+});
+
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
