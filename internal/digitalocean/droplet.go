@@ -108,6 +108,33 @@ func Get(ctx context.Context, client *godo.Client, id int) (*godo.Droplet, error
 	return d, nil
 }
 
+// Delete removes every DigitalOcean Droplet that belongs to this object:
+// the one in status.id, plus any carrying the owner tag (in case its ID never
+// reached status). A Droplet that is already gone counts as deleted.
+func Delete(ctx context.Context, client *godo.Client, droplet *webappv1.Droplet) error {
+	ids := map[int]bool{}
+	if droplet.Status.ID != 0 {
+		ids[droplet.Status.ID] = true
+	}
+
+	tag := OwnerTag(droplet)
+	list, _, err := client.Droplets.ListByTag(ctx, tag, &godo.ListOptions{PerPage: 200})
+	if err != nil {
+		return fmt.Errorf("listing droplets with tag %q: %w", tag, err)
+	}
+	for _, d := range list {
+		ids[d.ID] = true
+	}
+
+	for id := range ids {
+		resp, err := client.Droplets.Delete(ctx, id)
+		if err != nil && (resp == nil || resp.StatusCode != http.StatusNotFound) {
+			return fmt.Errorf("deleting droplet %d: %w", id, err)
+		}
+	}
+	return nil
+}
+
 // FindByOwnerTag returns the Droplet carrying the given tag, or ErrNotFound.
 func FindByOwnerTag(ctx context.Context, client *godo.Client, tag string) (*godo.Droplet, error) {
 	list, _, err := client.Droplets.ListByTag(ctx, tag, &godo.ListOptions{PerPage: 10})

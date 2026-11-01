@@ -1,4 +1,4 @@
 ## Append samples of your project ##
 resources:
-- webapp_v1_droplet.yaml
+- webapp_v1_dropletset.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

@@ -194,6 +194,13 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "droplet")
 		os.Exit(1)
 	}
+	if err := (&controller.DropletSetReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "dropletset")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if uiAddr != "0" {

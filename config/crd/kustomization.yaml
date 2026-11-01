@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/webapp.ferh6t.github.io_droplets.yaml
+- bases/webapp.ferh6t.github.io_dropletsets.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

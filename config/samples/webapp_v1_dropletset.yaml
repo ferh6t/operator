@@ -1,0 +1,29 @@
+apiVersion: webapp.ferh6t.github.io/v1
+kind: DropletSet
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: web
+spec:
+  # Scale with: kubectl scale dropletset web --replicas=3
+  replicas: 2
+  template:
+    labels:
+      app: web
+    spec:
+      region: fra1
+      size: s-1vcpu-1gb
+      image: ubuntu-24-04-x64
+      # Filled from .env by `make apply-dropletset-sample`
+      sshKeys: ${DO_SSH_KEYS}
+      monitoring: true
+      tags:
+        - k8s-managed
+      userData: |
+        #cloud-config
+        packages:
+          - nginx
+      tokenSecretRef:
+        name: digitalocean-token
+        key: token

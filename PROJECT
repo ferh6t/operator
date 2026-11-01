@@ -18,4 +18,13 @@ resources:
   kind: Droplet
   path: github.com/ferh6t/operator/api/v1
   version: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: ferh6t.github.io
+  group: webapp
+  kind: DropletSet
+  path: github.com/ferh6t/operator/api/v1
+  version: v1
 version: "3"

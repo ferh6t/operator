@@ -19,8 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
+	"github.com/digitalocean/godo"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	webappv1 "github.com/ferh6t/operator/api/v1"
@@ -37,7 +40,11 @@ import (
 )
 
 // requeueInterval is how often a Droplet is checked again, even without changes.
-const requeueInterval = 10 * time.Second
+const requeueInterval = 20 * time.Second
+
+// dropletFinalizer stops Kubernetes from removing a Droplet object until the
+// controller has deleted the real server on DigitalOcean.
+const dropletFinalizer = "webapp.ferh6t.github.io/droplet-cleanup"
 
 // DropletReconciler reconciles a Droplet object
 type DropletReconciler struct {
@@ -46,12 +53,17 @@ type DropletReconciler struct {
 
 	// Tracker records each reconcile for the dashboard. It may be nil.
 	Tracker *ui.Tracker
+
+	// NewDOClient builds the DigitalOcean client from a token. Tests replace
+	// it with a fake. Nil means digitalocean.NewClient.
+	NewDOClient func(token string) *godo.Client
 }
 
 // +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=droplets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=droplets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=droplets/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -110,6 +122,19 @@ func (r *DropletReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	// The object is being deleted: clean up DigitalOcean first.
+	if !dropletObject.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, dropletObject)
+	}
+
+	// Add the finalizer before anything can be created on DigitalOcean.
+	if controllerutil.AddFinalizer(dropletObject, dropletFinalizer) {
+		if err := r.Update(ctx, dropletObject); err != nil {
+			l.Error(err, "Failed to add finalizer to Droplet")
+			return ctrl.Result{}, err
+		}
+	}
+
 	token, err := r.readToken(ctx, dropletObject)
 	if err != nil {
 		l.Error(err, "Could not read DigitalOcean token")
@@ -120,7 +145,7 @@ func (r *DropletReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{RequeueAfter: requeueInterval}, nil
 	}
 
-	doClient := digitalocean.NewClient(token)
+	doClient := r.doClient(token)
 	d, created, err := digitalocean.Ensure(ctx, doClient, dropletObject)
 	if err != nil {
 		l.Error(err, "Could not create or find DigitalOcean Droplet")
@@ -150,8 +175,97 @@ func (r *DropletReconciler) reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	// Check the Droplet again every 10 seconds, even without changes
+	if err := r.reconcileConfigMap(ctx, dropletObject); err != nil {
+		l.Error(err, "Failed to reconcile ConfigMap")
+		return ctrl.Result{}, err
+	}
+
+	// Check the Droplet again every 20 seconds, even without changes
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// finalize deletes the real server on DigitalOcean, then removes the
+// finalizer so Kubernetes can delete the object. On failure the finalizer
+// stays and the next reconcile tries again.
+func (r *DropletReconciler) finalize(ctx context.Context, droplet *webappv1.Droplet) (ctrl.Result, error) {
+	l := logf.FromContext(ctx)
+	if !controllerutil.ContainsFinalizer(droplet, dropletFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	token, err := r.readToken(ctx, droplet)
+	if err != nil {
+		l.Error(err, "Could not read DigitalOcean token, so the DigitalOcean Droplet was not deleted")
+		return r.failDeletion(ctx, droplet, "TokenUnavailable", err)
+	}
+
+	if err := digitalocean.Delete(ctx, r.doClient(token), droplet); err != nil {
+		l.Error(err, "Could not delete DigitalOcean Droplet", "id", droplet.Status.ID)
+		return r.failDeletion(ctx, droplet, "DeletionFailed", err)
+	}
+	l.Info("Deleted DigitalOcean Droplet", "id", droplet.Status.ID)
+
+	controllerutil.RemoveFinalizer(droplet, dropletFinalizer)
+	if err := r.Update(ctx, droplet); err != nil {
+		l.Error(err, "Failed to remove finalizer from Droplet")
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// failDeletion records why cleanup failed and returns the error, so the
+// controller retries with backoff.
+func (r *DropletReconciler) failDeletion(ctx context.Context, droplet *webappv1.Droplet, reason string, err error) (ctrl.Result, error) {
+	setCondition(droplet, "Degraded", metav1.ConditionTrue, reason, "Could not delete Droplet from DigitalOcean: "+err.Error())
+	if uerr := r.Status().Update(ctx, droplet); uerr != nil {
+		return ctrl.Result{}, uerr
+	}
+	return ctrl.Result{}, err
+}
+
+// doClient returns a DigitalOcean client for the token.
+func (r *DropletReconciler) doClient(token string) *godo.Client {
+	if r.NewDOClient != nil {
+		return r.NewDOClient(token)
+	}
+	return digitalocean.NewClient(token)
+}
+
+// configMapName is the name of the ConfigMap that holds a Droplet's details.
+func configMapName(droplet *webappv1.Droplet) string {
+	return droplet.Name + "-info"
+}
+
+// reconcileConfigMap creates or updates a ConfigMap with the Droplet's
+// address and state, so other apps in the cluster can read them.
+// The Droplet owns it, so Kubernetes deletes it together with the Droplet.
+func (r *DropletReconciler) reconcileConfigMap(ctx context.Context, droplet *webappv1.Droplet) error {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName(droplet),
+			Namespace: droplet.Namespace,
+		},
+	}
+
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Data = map[string]string{
+			"id":          strconv.Itoa(droplet.Status.ID),
+			"state":       droplet.Status.State,
+			"publicIPv4":  droplet.Status.PublicIPv4,
+			"privateIPv4": droplet.Status.PrivateIPv4,
+			"publicIPv6":  droplet.Status.PublicIPv6,
+			"region":      droplet.Spec.Region,
+			"size":        droplet.Spec.Size,
+		}
+		return controllerutil.SetControllerReference(droplet, cm, r.Scheme)
+	})
+	if err != nil {
+		return err
+	}
+	if op != controllerutil.OperationResultNone {
+		logf.FromContext(ctx).Info("Reconciled ConfigMap", "name", cm.Name, "operation", op)
+	}
+	return nil
 }
 
 // readToken reads the DigitalOcean API token from the Secret in spec.tokenSecretRef.
@@ -188,6 +302,7 @@ func setCondition(droplet *webappv1.Droplet, condType string, status metav1.Cond
 func (r *DropletReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&webappv1.Droplet{}).
+		Owns(&corev1.ConfigMap{}).
 		Named("droplet").
 		Complete(r)
 }

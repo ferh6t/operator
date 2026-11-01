@@ -159,7 +159,7 @@ function resultPill(e) {
 function renderRows(list) {
   const key = d => d.namespace + "/" + d.name;
   if (!list.length) {
-    $("rows").innerHTML = '<tr><td colspan="9" class="empty">No Droplets. Try <span class="mono">make apply-sample</span></td></tr>';
+    $("rows").innerHTML = '<tr><td colspan="9" class="empty">No Droplets. Try <span class="mono">make apply-dropletset-sample</span></td></tr>';
     return;
   }
   if (!selected || !list.some(d => key(d) === selected)) selected = key(list[0]);

@@ -7,6 +7,18 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - secrets
   verbs:
   - get
@@ -16,6 +28,7 @@ rules:
   - webapp.ferh6t.github.io
   resources:
   - droplets
+  - dropletsets
   verbs:
   - create
   - delete
@@ -28,12 +41,14 @@ rules:
   - webapp.ferh6t.github.io
   resources:
   - droplets/finalizers
+  - dropletsets/finalizers
   verbs:
   - update
 - apiGroups:
   - webapp.ferh6t.github.io
   resources:
   - droplets/status
+  - dropletsets/status
   verbs:
   - get
   - patch

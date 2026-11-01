@@ -177,13 +177,13 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
-.PHONY: apply-sample
-apply-sample: ## Create the DigitalOcean token Secret and apply the Droplet sample using values from .env.
+.PHONY: apply-dropletset-sample
+apply-dropletset-sample: ## Create the DigitalOcean token Secret and apply the DropletSet sample using values from .env.
 	@test -f .env || { echo ".env not found; run: cp .env.example .env"; exit 1; }
 	@set -a; . ./.env; set +a; \
 	"$(KUBECTL)" create secret generic digitalocean-token --from-literal=token="$$DO_TOKEN" \
 		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -; \
-	envsubst '$$DO_SSH_KEYS' < config/samples/webapp_v1_droplet.yaml | "$(KUBECTL)" apply -f -
+	envsubst '$$DO_SSH_KEYS' < config/samples/webapp_v1_dropletset.yaml | "$(KUBECTL)" apply -f -
 
 ##@ Dependencies
 
