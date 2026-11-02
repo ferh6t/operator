@@ -177,13 +177,43 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
-.PHONY: apply-dropletset-sample
-apply-dropletset-sample: ## Create the DigitalOcean token Secret and apply the DropletSet sample using values from .env.
+# The controller must still run while Droplets are deleted: their finalizers
+# delete the real servers on DigitalOcean. So the servers go first, then the
+# controller. PostgresClusters go before Droplets, or a cluster would create
+# its Droplets again.
+.PHONY: undeploypg
+undeploypg: kustomize ## Delete every PostgresCluster and Droplet with their DigitalOcean servers, then undeploy the controller. Start again from scratch.
+	@if ! "$(KUBECTL)" get crd droplets.webapp.ferh6t.github.io >/dev/null 2>&1; then \
+		echo "CRDs are not installed: no Droplets to delete"; \
+	else \
+		"$(KUBECTL)" -n operator-system rollout status deploy/operator-controller-manager --timeout=60s >/dev/null 2>&1 || \
+			{ echo "The controller is not running, and it must run to delete the DigitalOcean servers."; \
+			  echo "Run 'make deploy IMG=<image>' first, then 'make undeploypg' again."; exit 1; }; \
+		echo "Deleting PostgresClusters and Droplets"; \
+		"$(KUBECTL)" delete postgresclusters --all -A --ignore-not-found; \
+		"$(KUBECTL)" get crd dropletsets.webapp.ferh6t.github.io >/dev/null 2>&1 && \
+			"$(KUBECTL)" delete dropletsets --all -A --ignore-not-found; \
+		"$(KUBECTL)" delete droplets --all -A --ignore-not-found --wait=false; \
+		echo "Waiting for the DigitalOcean servers to be deleted"; \
+		left=1; \
+		for i in $$(seq 1 60); do \
+			left=$$("$(KUBECTL)" get droplets -A -o name 2>/dev/null | wc -l | tr -d ' '); \
+			[ "$$left" = 0 ] && break; \
+			echo "  $$left Droplet(s) left"; sleep 5; \
+		done; \
+		[ "$$left" = 0 ] || { echo "Droplets are still being deleted after 5 minutes: check 'kubectl get droplets -A' and the controller logs"; exit 1; }; \
+		echo "All Droplets and their servers are deleted"; \
+		"$(KUBECTL)" delete crd dropletsets.webapp.ferh6t.github.io --ignore-not-found; \
+	fi
+	$(MAKE) undeploy ignore-not-found=true
+
+.PHONY: apply-postgrescluster-sample
+apply-postgrescluster-sample: ## Create the DigitalOcean token Secret and apply the PostgresCluster sample using values from .env.
 	@test -f .env || { echo ".env not found; run: cp .env.example .env"; exit 1; }
 	@set -a; . ./.env; set +a; \
 	"$(KUBECTL)" create secret generic digitalocean-token --from-literal=token="$$DO_TOKEN" \
 		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -; \
-	envsubst '$$DO_SSH_KEYS' < config/samples/webapp_v1_dropletset.yaml | "$(KUBECTL)" apply -f -
+	envsubst '$$DO_SSH_KEYS' < config/samples/webapp_v1_postgrescluster.yaml | "$(KUBECTL)" apply -f -
 
 ##@ Dependencies
 

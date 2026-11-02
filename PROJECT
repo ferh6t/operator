@@ -24,7 +24,7 @@ resources:
   controller: true
   domain: ferh6t.github.io
   group: webapp
-  kind: DropletSet
+  kind: PostgresCluster
   path: github.com/ferh6t/operator/api/v1
   version: v1
 version: "3"

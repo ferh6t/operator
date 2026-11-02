@@ -42,11 +42,18 @@ func TestHandleState(t *testing.T) {
 			Status:     webappv1.DropletStatus{ID: 42, State: "active", PublicIPv4: "203.0.113.7"},
 		},
 		&webappv1.Droplet{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "default"}},
+		&webappv1.PostgresCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "pg", Namespace: "default"},
+			Spec:       webappv1.PostgresClusterSpec{Replicas: 3, PostgresVersion: "16", Droplet: webappv1.DropletSpec{Region: "fra1"}},
+			Status: webappv1.PostgresClusterStatus{Phase: "Running", Primary: "pg-0", ReadyMembers: 3,
+				Members: []webappv1.PostgresMember{{Name: "pg-0", Role: "leader", State: "running"}}},
+		},
 	).Build()
 
 	tr := NewTracker()
 	tr.Record(Event{Time: time.Now(), Namespace: "default", Name: "b", Duration: time.Millisecond})
 	tr.Record(Event{Time: time.Now(), Namespace: "default", Name: "b", Error: "boom"})
+	tr.Record(Event{Time: time.Now(), Kind: KindPostgresCluster, Namespace: "default", Name: "pg"})
 
 	s := &Server{Reader: c, Tracker: tr}
 	rec := httptest.NewRecorder()
@@ -63,7 +70,10 @@ func TestHandleState(t *testing.T) {
 	if b.Status.PublicIPv4 != "203.0.113.7" || b.LastReconcile == nil || b.LastReconcile.Error != "boom" {
 		t.Fatalf("droplet b missing status or last reconcile: %+v", b)
 	}
-	if got.Total != 2 || got.Errors != 1 || len(got.Events) != 2 || got.Events[0].Error != "boom" {
+	if len(got.Postgres) != 1 || got.Postgres[0].Status.Primary != "pg-0" || got.Postgres[0].Region != "fra1" || got.Postgres[0].LastReconcile == nil {
+		t.Fatalf("postgres cluster missing or incomplete: %+v", got.Postgres)
+	}
+	if got.Total != 3 || got.Errors != 1 || len(got.Events) != 3 || got.Events[1].Error != "boom" {
 		t.Fatalf("wrong totals or event order: total=%d errors=%d events=%+v", got.Total, got.Errors, got.Events)
 	}
 }

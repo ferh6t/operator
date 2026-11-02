@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Droplet Reconciler</title>
+<title>Operator Dashboard</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #646b78; --line: #e3e6eb;
@@ -28,7 +28,7 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
   .dot.off { background: var(--bad); }
   main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 40px; display: grid; gap: 20px; }
-  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
   .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
   .tile .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   .tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
@@ -51,6 +51,15 @@
   .pill.warn { color: var(--warn); background: var(--warn-bg); }
   .pill.bad { color: var(--bad); background: var(--bad-bg); }
   .pill.idle { color: var(--idle); background: var(--idle-bg); }
+  .pill.primary { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .pg { border-bottom: 1px solid var(--line); }
+  .pg:last-child { border-bottom: 0; }
+  .pg-head { padding: 14px 16px 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  .pg-head .name { font-size: 15px; font-weight: 600; }
+  .pg-head .fact { color: var(--muted); }
+  .pg-head .fact strong { color: var(--text); font-weight: 600; }
+  .pg table th:first-child, .pg table td:first-child { padding-left: 16px; }
+  .pg-conds { padding: 10px 16px 14px; display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
   .empty { padding: 28px 16px; color: var(--muted); text-align: center; }
   .grid2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 20px; align-items: start; }
   .detail { padding: 14px 16px; display: grid; gap: 14px; }
@@ -70,22 +79,29 @@
   @media (max-width: 900px) {
     .grid2 { grid-template-columns: 1fr; }
     .tiles { grid-template-columns: repeat(2, 1fr); }
+    .pg-conds { grid-template-columns: 1fr; }
     main, header { padding-left: 16px; padding-right: 16px; }
   }
 </style>
 </head>
 <body>
 <header>
-  <h1>Droplet Reconciler</h1>
+  <h1>Operator dashboard</h1>
   <div class="live"><span class="dot" id="dot"></span><span id="liveText">Connecting…</span></div>
 </header>
 <main>
   <div id="banner"></div>
   <section class="tiles">
+    <div class="tile"><div class="label">Postgres running</div><div class="value" id="tPostgres">–</div></div>
     <div class="tile"><div class="label">Droplets</div><div class="value" id="tDroplets">–</div></div>
     <div class="tile"><div class="label">Available</div><div class="value" id="tAvailable">–</div></div>
     <div class="tile"><div class="label">Reconciles</div><div class="value" id="tTotal">–</div></div>
     <div class="tile"><div class="label">Failed reconciles</div><div class="value" id="tFailed">–</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Postgres clusters <span>etcd + Patroni health, checked every 30s</span></h2>
+    <div id="pgs"><div class="empty">Loading…</div></div>
   </section>
 
   <section class="panel">
@@ -159,7 +175,7 @@ function resultPill(e) {
 function renderRows(list) {
   const key = d => d.namespace + "/" + d.name;
   if (!list.length) {
-    $("rows").innerHTML = '<tr><td colspan="9" class="empty">No Droplets. Try <span class="mono">make apply-dropletset-sample</span></td></tr>';
+    $("rows").innerHTML = '<tr><td colspan="9" class="empty">No Droplets. Try <span class="mono">make apply-postgrescluster-sample</span></td></tr>';
     return;
   }
   if (!selected || !list.some(d => key(d) === selected)) selected = key(list[0]);
@@ -183,13 +199,7 @@ function renderDetail(list) {
   $("detailName").textContent = d.namespace + "/" + d.name;
   const s = d.spec, st = d.status;
   const row = (k, v) => `<dt>${k}</dt><dd>${v || '<span class="muted">–</span>'}</dd>`;
-  const conds = (st.conditions || []).map(c => `
-    <div class="cond">
-      <div class="top"><strong>${esc(c.type)}</strong>
-        <span class="pill ${c.status === "True" ? (c.type === "Degraded" ? "bad" : "ok") : "idle"}">${esc(c.status)}</span>
-        <span class="muted">${esc(c.reason)} · ${ago(c.lastTransitionTime)}</span></div>
-      <div class="muted">${esc(c.message)}</div>
-    </div>`).join("") || '<div class="muted">No conditions yet</div>';
+  const conds = condsHTML(st.conditions) || '<div class="muted">No conditions yet</div>';
   const lr = d.lastReconcile;
   $("detail").innerHTML = `
     <dl class="kv">
@@ -209,11 +219,91 @@ function renderDetail(list) {
     ${s.userData ? `<div><div class="muted" style="margin-bottom:6px">userData</div><pre>${esc(s.userData)}</pre></div>` : ""}`;
 }
 
+const PHASE_CLS = { Running: "ok", Degraded: "bad", Provisioning: "warn", Installing: "warn", Bootstrapping: "warn" };
+
+function bytes(n) {
+  if (n == null) return '<span class="muted">–</span>';
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+function rolePill(role) {
+  if (!role) return '<span class="muted">–</span>';
+  return ["leader", "master", "primary"].includes(role)
+    ? '<span class="pill primary">primary</span>' : `<span class="pill idle">${esc(role)}</span>`;
+}
+
+function pgStatePill(state) {
+  if (!state) return '<span class="muted">–</span>';
+  const cls = state === "running" || state === "streaming" ? "ok"
+    : state === "starting" || state.includes("creating") ? "warn" : "bad";
+  return `<span class="pill ${cls}">${esc(state)}</span>`;
+}
+
+function etcdPill(h) {
+  if (h == null) return '<span class="muted">–</span>';
+  return h ? '<span class="pill ok">healthy</span>' : '<span class="pill bad">down</span>';
+}
+
+function condsHTML(conditions) {
+  return (conditions || []).map(c => `
+    <div class="cond">
+      <div class="top"><strong>${esc(c.type)}</strong>
+        <span class="pill ${c.status === "True" ? (c.type === "Degraded" ? "bad" : "ok") : (c.type === "Degraded" ? "ok" : "idle")}">${esc(c.status)}</span>
+        <span class="muted">${esc(c.reason)} · ${ago(c.lastTransitionTime)}</span></div>
+      <div class="muted">${esc(c.message)}</div>
+    </div>`).join("");
+}
+
+function renderPostgres(list) {
+  if (!list.length) {
+    $("pgs").innerHTML = '<div class="empty">No PostgresClusters. Try <span class="mono">make apply-postgrescluster-sample</span></div>';
+    return;
+  }
+  $("pgs").innerHTML = list.map(pg => {
+    const st = pg.status, members = st.members || [];
+    const etcdUp = members.filter(m => m.etcdHealthy === true).length;
+    const etcdKnown = members.some(m => m.etcdHealthy != null);
+    const phase = pg.deleting ? "Deleting" : (st.phase || "Pending");
+    const lr = pg.lastReconcile;
+    const rows = members.map(m => `
+      <tr>
+        <td><strong>${esc(m.name)}</strong></td>
+        <td>${rolePill(m.role)}</td>
+        <td>${pgStatePill(m.state)}</td>
+        <td>${etcdPill(m.etcdHealthy)}</td>
+        <td class="mono">${["leader", "master", "primary"].includes(m.role) ? '<span class="muted">–</span>' : bytes(m.lagBytes)}</td>
+        <td class="mono">${m.timeline || '<span class="muted">–</span>'}</td>
+        <td class="mono">${esc(m.privateIPv4) || '<span class="muted">–</span>'}</td>
+        <td class="mono">${esc(m.publicIPv4) || '<span class="muted">–</span>'}</td>
+      </tr>`).join("") || '<tr><td colspan="8" class="empty">No members yet: waiting for Droplets</td></tr>';
+    return `
+    <div class="pg">
+      <div class="pg-head">
+        <span class="name">${esc(pg.name)}</span><span class="muted">${esc(pg.namespace)}</span>
+        <span class="pill ${pg.deleting ? "warn" : (PHASE_CLS[phase] || "idle")}">${esc(phase)}</span>
+        <span class="fact">Primary <strong>${esc(st.primary) || "–"}</strong></span>
+        <span class="fact">Ready <strong>${st.readyMembers ?? 0} / ${pg.replicas}</strong></span>
+        <span class="fact">etcd <strong>${etcdKnown ? etcdUp + " / " + pg.replicas : "–"}</strong></span>
+        <span class="fact">Health check <strong>${st.lastHealthCheck ? ago(st.lastHealthCheck) : "–"}</strong></span>
+        <span class="fact">PostgreSQL ${esc(pg.postgresVersion)} · ${esc(pg.region)} · <span class="mono">${esc(pg.size)}</span></span>
+        <span class="fact">Last reconcile ${lr ? ago(lr.time) + " · " + ms(lr.durationNs) : "–"} ${resultPill(lr)}</span>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr><th>Member</th><th>Role</th><th>PostgreSQL</th><th>etcd</th><th>Lag</th><th>Timeline</th><th>Private IP</th><th>Public IP</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="pg-conds">${condsHTML(st.conditions)}</div>
+    </div>`;
+  }).join("");
+}
+
 function renderEvents(events) {
   if (!events.length) { $("events").innerHTML = '<div class="empty">No reconciles yet</div>'; return; }
   $("events").innerHTML = events.slice(0, 100).map(e => `
     <div class="ev">
-      <div class="line">${resultPill(e)}<strong>${esc(e.namespace)}/${esc(e.name)}</strong>
+      <div class="line">${resultPill(e)}<span class="muted">${esc(e.kind || "Droplet")}</span><strong>${esc(e.namespace)}/${esc(e.name)}</strong>
         <span class="muted">gen ${e.generation} · ${ms(e.durationNs)} · ${ago(e.time)}</span></div>
       ${e.error ? `<div class="err">${esc(e.error)}</div>` : ""}
     </div>`).join("");
@@ -228,11 +318,14 @@ async function tick() {
     $("dot").classList.remove("off");
     $("liveText").textContent = "Live · updated " + new Date().toLocaleTimeString();
     $("banner").innerHTML = data.listError
-      ? `<div class="banner">Could not list Droplets: ${esc(data.listError)}</div>` : "";
+      ? `<div class="banner">Could not list resources: ${esc(data.listError)}</div>` : "";
+    const pgs = data.postgresClusters || [];
+    $("tPostgres").textContent = pgs.filter(p => p.status.phase === "Running").length + " / " + pgs.length;
     $("tDroplets").textContent = data.droplets.length;
     $("tAvailable").textContent = data.droplets.filter(d => cond(d, "Available")?.status === "True").length;
     $("tTotal").textContent = data.totalReconciles;
     $("tFailed").textContent = data.failedReconciles;
+    renderPostgres(pgs);
     renderRows(data.droplets);
     renderDetail(data.droplets);
     renderEvents(data.events);

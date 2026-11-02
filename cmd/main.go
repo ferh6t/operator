@@ -194,11 +194,12 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "droplet")
 		os.Exit(1)
 	}
-	if err := (&controller.DropletSetReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	if err := (&controller.PostgresClusterReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Tracker: tracker,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "dropletset")
+		setupLog.Error(err, "Failed to create controller", "controller", "postgrescluster")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

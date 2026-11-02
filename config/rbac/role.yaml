@@ -21,14 +21,17 @@ rules:
   resources:
   - secrets
   verbs:
+  - create
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - webapp.ferh6t.github.io
   resources:
   - droplets
-  - dropletsets
+  - postgresclusters
   verbs:
   - create
   - delete
@@ -41,14 +44,14 @@ rules:
   - webapp.ferh6t.github.io
   resources:
   - droplets/finalizers
-  - dropletsets/finalizers
+  - postgresclusters/finalizers
   verbs:
   - update
 - apiGroups:
   - webapp.ferh6t.github.io
   resources:
   - droplets/status
-  - dropletsets/status
+  - postgresclusters/status
   verbs:
   - get
   - patch

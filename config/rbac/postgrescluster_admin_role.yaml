@@ -11,17 +11,17 @@ metadata:
   labels:
     app.kubernetes.io/name: operator
     app.kubernetes.io/managed-by: kustomize
-  name: dropletset-admin-role
+  name: postgrescluster-admin-role
 rules:
 - apiGroups:
   - webapp.ferh6t.github.io
   resources:
-  - dropletsets
+  - postgresclusters
   verbs:
   - '*'
 - apiGroups:
   - webapp.ferh6t.github.io
   resources:
-  - dropletsets/status
+  - postgresclusters/status
   verbs:
   - get

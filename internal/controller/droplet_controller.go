@@ -88,6 +88,7 @@ func (r *DropletReconciler) record(ctx context.Context, req ctrl.Request, start 
 	}
 	e := ui.Event{
 		Time:      time.Now(),
+		Kind:      ui.KindDroplet,
 		Namespace: req.Namespace,
 		Name:      req.Name,
 		Duration:  time.Since(start),

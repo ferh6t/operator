@@ -1,0 +1,31 @@
+apiVersion: webapp.ferh6t.github.io/v1
+kind: PostgresCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: pg
+spec:
+  # Odd, so etcd keeps a quorum when one member is down. Cannot be changed later.
+  replicas: 3
+  postgresVersion: "16"
+  # Who may connect to PostgreSQL with a password. Defaults to the
+  # DigitalOcean private network. Add your own IP/32 to connect from outside.
+  allowedSourceRanges:
+    - 10.0.0.0/8
+  droplet:
+    region: fra1
+    # etcd + Patroni + PostgreSQL need at least 2 GB of memory.
+    size: s-1vcpu-2gb-intel
+    image: ubuntu-24-04-x64
+    # Optional: your own keys, for logging in yourself. The controller uses
+    # its own key from the <name>-ssh Secret.
+    # Filled from .env by `make apply-postgrescluster-sample`
+    sshKeys: ${DO_SSH_KEYS}
+    monitoring: true
+    tags:
+      - k8s-managed
+      - postgres
+    tokenSecretRef:
+      name: digitalocean-token
+      key: token

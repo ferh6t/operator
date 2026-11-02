@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package ui serves a small live dashboard for the Droplet reconciler.
+// Package ui serves a small live dashboard for the operator's reconcilers.
 package ui
 
 import (
@@ -25,9 +25,17 @@ import (
 // maxEvents is how many recent reconciles the dashboard keeps in memory.
 const maxEvents = 200
 
+// Kinds of objects the dashboard tracks.
+const (
+	KindDroplet         = "Droplet"
+	KindPostgresCluster = "PostgresCluster"
+)
+
 // Event is one finished Reconcile call.
 type Event struct {
-	Time       time.Time     `json:"time"`
+	Time time.Time `json:"time"`
+	// Kind of the reconciled object. Empty means Droplet.
+	Kind       string        `json:"kind,omitempty"`
 	Namespace  string        `json:"namespace"`
 	Name       string        `json:"name"`
 	Duration   time.Duration `json:"durationNs"`
@@ -63,11 +71,19 @@ func (t *Tracker) Record(e Event) {
 	if e.Error != "" {
 		t.errors++
 	}
-	t.last[e.Namespace+"/"+e.Name] = e
+	t.last[eventKey(e.Kind, e.Namespace, e.Name)] = e
 	t.events = append(t.events, e)
 	if len(t.events) > maxEvents {
 		t.events = t.events[len(t.events)-maxEvents:]
 	}
+}
+
+// eventKey identifies one object across kinds.
+func eventKey(kind, namespace, name string) string {
+	if kind == "" {
+		kind = KindDroplet
+	}
+	return kind + "/" + namespace + "/" + name
 }
 
 // snapshot returns copies of the recorded data, newest event first.
