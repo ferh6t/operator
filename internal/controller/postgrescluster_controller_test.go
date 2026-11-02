@@ -27,6 +27,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"golang.org/x/crypto/ssh"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,7 +74,8 @@ func (f *fakeExecutor) etcdCommand(node *postgres.Node, cmd string) string {
 		prefix := strings.TrimSuffix(node.Name, node.Name[strings.LastIndex(node.Name, "-"):])
 		for i, id := range []uint64{4085538702289923226, 2, 3} {
 			f.etcd = append(f.etcd, postgres.EtcdMember{ID: id, Name: fmt.Sprintf("%s-%d", prefix, i),
-				PeerURLs: []string{fmt.Sprintf("http://10.0.0.%d:2380", i+1)}})
+				PeerURLs:   []string{fmt.Sprintf("http://10.0.0.%d:2380", i+1)},
+				ClientURLs: []string{fmt.Sprintf("http://10.0.0.%d:2379", i+1)}})
 		}
 	}
 	fields := strings.Fields(cmd)
@@ -83,8 +85,9 @@ func (f *fakeExecutor) etcdCommand(node *postgres.Node, cmd string) string {
 		f.etcd = slices.DeleteFunc(f.etcd, func(m postgres.EtcdMember) bool { return m.HexID() == hex })
 	case strings.Contains(cmd, "member add "):
 		f.nextID++
+		peer := strings.TrimPrefix(fields[len(fields)-1], "--peer-urls=")
 		f.etcd = append(f.etcd, postgres.EtcdMember{ID: 100 + f.nextID,
-			PeerURLs: []string{strings.TrimPrefix(fields[len(fields)-1], "--peer-urls=")}})
+			PeerURLs: []string{peer}, ClientURLs: []string{strings.Replace(peer, ":2380", ":2379", 1)}})
 	}
 	out, _ := json.Marshal(map[string]any{"members": f.etcd})
 	return string(out)
@@ -112,6 +115,21 @@ func (f *fakeExecutor) Run(_ context.Context, node *postgres.Node, cmd string, _
 	switch {
 	case strings.Contains(cmd, ".done 2>/dev/null"):
 		return f.stepReply, nil
+	case strings.Contains(cmd, "endpoint health --cluster"):
+		var out strings.Builder
+		for _, m := range f.etcd {
+			for _, u := range m.ClientURLs {
+				ip := strings.TrimSuffix(strings.TrimPrefix(u, "http://"), ":2379")
+				if f.etcdDown[ip] {
+					fmt.Fprintf(&out, "%s is unhealthy: failed to commit proposal: context deadline exceeded\n", u)
+				} else {
+					fmt.Fprintf(&out, "%s is healthy: successfully committed proposal: took = 2ms\n", u)
+				}
+			}
+		}
+		return out.String(), nil
+	case strings.Contains(cmd, "/switchover"):
+		return "Successfully switched over\n200", nil
 	case strings.Contains(cmd, "endpoint health"):
 		// Answer like etcdctl: one line per endpoint in --endpoints.
 		list := strings.Fields(strings.SplitN(cmd, "--endpoints=", 2)[1])[0]
@@ -180,6 +198,18 @@ var _ = Describe("PostgresCluster Controller", func() {
 
 	// makeDropletsReady marks the cluster's Droplets Available with addresses,
 	// as the Droplet controller would once their servers run.
+	// markReady marks Droplets <name>-from .. <name>-(to-1) Available, at
+	// 203.0.113.<i+1> and 10.0.0.<i+1>.
+	markReady := func(name string, from, to int) {
+		for i := from; i < to; i++ {
+			d := &webappv1.Droplet{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-%d", name, i), Namespace: namespace}, d)).To(Succeed())
+			d.Status.PublicIPv4 = fmt.Sprintf("203.0.113.%d", i+1)
+			d.Status.PrivateIPv4 = fmt.Sprintf("10.0.0.%d", i+1)
+			meta.SetStatusCondition(&d.Status.Conditions, metav1.Condition{Type: "Available", Status: metav1.ConditionTrue, Reason: "Active"})
+			Expect(k8sClient.Status().Update(ctx, d)).To(Succeed())
+		}
+	}
 	makeDropletsReady := func(pg *webappv1.PostgresCluster) {
 		for i := range 3 {
 			d := &webappv1.Droplet{}
@@ -196,8 +226,10 @@ var _ = Describe("PostgresCluster Controller", func() {
 			&webappv1.PostgresCluster{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-ssh", Namespace: namespace}},
 			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name + "-credentials", Namespace: namespace}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name + "-primary-proxy", Namespace: namespace}},
+			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-primary", Namespace: namespace}},
 		}
-		for i := range 3 {
+		for i := range 5 {
 			objs = append(objs, &webappv1.Droplet{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-%d", name, i), Namespace: namespace}})
 		}
 		for _, o := range objs {
@@ -456,6 +488,140 @@ var _ = Describe("PostgresCluster Controller", func() {
 		again := &webappv1.Droplet{}
 		Expect(k8sClient.Get(ctx, key, again)).To(Succeed())
 		Expect(again.UID).NotTo(Equal(first.UID))
+	})
+
+	setReplicas := func(name string, n int32) {
+		pg := &webappv1.PostgresCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, pg)).To(Succeed())
+		pg.Spec.Replicas = n
+		Expect(k8sClient.Update(ctx, pg)).To(Succeed())
+	}
+	exists := func(name string) bool {
+		return k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &webappv1.Droplet{}) == nil
+	}
+	runningCluster := func(name string) (*PostgresClusterReconciler, *fakeExecutor) {
+		Expect(k8sClient.Create(ctx, newCluster(name))).To(Succeed())
+		ex := &fakeExecutor{stepReply: "done\n"}
+		r := &PostgresClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(),
+			NewExecutor: func(ssh.Signer) postgres.Executor { return ex }}
+		reconcileOnce(r, name)
+		markReady(name, 0, 3)
+		pg := reconcileOnce(r, name)
+		Expect(pg.Status.Phase).To(Equal(webappv1.PostgresPhaseRunning))
+		Expect(pg.Status.RunningReplicas).To(Equal(int32(3)))
+		return r, ex
+	}
+
+	It("scales up from 3 to 5, adding etcd members one at a time", func() {
+		const name = "pg-up"
+		DeferCleanup(cleanup, name)
+		r, ex := runningCluster(name)
+
+		setReplicas(name, 5)
+		pg := reconcileOnce(r, name)
+		Expect(exists(name + "-3")).To(BeTrue())
+		Expect(exists(name + "-4")).To(BeTrue())
+		Expect(pg.Status.Phase).To(Equal(webappv1.PostgresPhaseScaling))
+		Expect(meta.IsStatusConditionTrue(pg.Status.Conditions, "Available")).To(BeTrue(), "the database keeps serving")
+
+		By("adding pg-3 to etcd, but not pg-4 yet")
+		markReady(name, 3, 5)
+		ex.etcdDown = map[string]bool{"10.0.0.4": true, "10.0.0.5": true}
+		pg = reconcileOnce(r, name)
+		Expect(ex.ran(fmt.Sprintf("member add %s-3 ", name))).To(BeTrue())
+		Expect(ex.ran(fmt.Sprintf("member add %s-4 ", name))).To(BeFalse())
+		Expect(ex.ran(name+"-4: systemctl enable --now patroni")).To(BeFalse(), "Patroni starts only on configured members")
+		Expect(pg.Status.Phase).To(Equal(webappv1.PostgresPhaseScaling))
+
+		By("adding pg-4 once pg-3 has joined")
+		ex.startMember(name+"-3", "10.0.0.4")
+		reconcileOnce(r, name)
+		Expect(ex.ran(fmt.Sprintf("member add %s-4 ", name))).To(BeTrue())
+
+		By("running with 5 members once both have joined")
+		ex.startMember(name+"-4", "10.0.0.5")
+		ex.clusterJSON = `{"members":[
+			{"name":"%[1]s-0","role":"leader","state":"running"},
+			{"name":"%[1]s-1","role":"replica","state":"streaming","lag":0},
+			{"name":"%[1]s-2","role":"replica","state":"streaming","lag":0},
+			{"name":"%[1]s-3","role":"replica","state":"streaming","lag":0},
+			{"name":"%[1]s-4","role":"replica","state":"streaming","lag":0}]}`
+		pg = reconcileOnce(r, name)
+		Expect(pg.Status.Phase).To(Equal(webappv1.PostgresPhaseRunning))
+		Expect(pg.Status.ReadyMembers).To(Equal(int32(5)))
+		Expect(pg.Status.RunningReplicas).To(Equal(int32(5)))
+	})
+
+	It("scales down from 3 to 1, highest member first, leaving etcd before the Droplet goes", func() {
+		const name = "pg-down"
+		DeferCleanup(cleanup, name)
+		r, ex := runningCluster(name)
+
+		setReplicas(name, 1)
+		pg := reconcileOnce(r, name)
+		Expect(ex.ran("member remove 3")).To(BeTrue(), "pg-2 leaves etcd")
+		Expect(exists(name + "-2")).To(BeFalse())
+		Expect(exists(name+"-1")).To(BeTrue(), "one member per reconcile")
+		Expect(pg.Status.Phase).To(Equal(webappv1.PostgresPhaseScaling))
+
+		reconcileOnce(r, name)
+		Expect(ex.ran("member remove 2")).To(BeTrue(), "pg-1 leaves etcd")
+		Expect(exists(name + "-1")).To(BeFalse())
+
+		pg = reconcileOnce(r, name)
+		Expect(pg.Status.Phase).To(Equal(webappv1.PostgresPhaseRunning))
+		Expect(pg.Status.Members).To(HaveLen(1))
+		Expect(pg.Status.Primary).To(Equal(name + "-0"))
+		Expect(pg.Status.RunningReplicas).To(Equal(int32(1)))
+	})
+
+	It("moves the primary away before removing it", func() {
+		const name = "pg-handover"
+		DeferCleanup(cleanup, name)
+		r, ex := runningCluster(name)
+		ex.clusterJSON = `{"members":[
+			{"name":"%[1]s-0","role":"replica","state":"streaming","lag":0},
+			{"name":"%[1]s-1","role":"replica","state":"streaming","lag":0},
+			{"name":"%[1]s-2","role":"leader","state":"running"}]}`
+
+		setReplicas(name, 1)
+		pg := reconcileOnce(r, name)
+		Expect(ex.ran(fmt.Sprintf(`"candidate":"%s-0","leader":"%s-2"`, name, name))).To(BeTrue())
+		Expect(ex.ran("member remove")).To(BeFalse(), "nothing is removed before the primary has moved")
+		Expect(exists(name + "-2")).To(BeTrue())
+		Expect(meta.FindStatusCondition(pg.Status.Conditions, "Progressing").Message).To(ContainSubstring("Moved the primary"))
+	})
+
+	It("runs a proxy to the primary and follows a failover", func() {
+		const name = "pg-proxy"
+		DeferCleanup(cleanup, name)
+		r, ex := runningCluster(name)
+
+		proxyEnv := func() map[string]string {
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-primary-proxy", Namespace: namespace}, dep)).To(Succeed())
+			env := map[string]string{}
+			for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+				env[e.Name] = e.Value
+			}
+			return env
+		}
+		Expect(proxyEnv()).To(Equal(map[string]string{
+			"PRIMARY": name + "-0", "HOST": "203.0.113.1", "FINGERPRINT": "SHA256:fake-" + name + "-0",
+		}))
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-primary", Namespace: namespace}, svc)).To(Succeed())
+		Expect(svc.Spec.Ports[0].Port).To(Equal(int32(5432)))
+		Expect(svc.Spec.Selector).To(HaveKeyWithValue(webappv1.PostgresClusterLabel, name))
+
+		By("pointing the tunnel at the new primary after a failover")
+		ex.clusterJSON = `{"members":[
+			{"name":"%[1]s-0","role":"replica","state":"streaming","lag":0},
+			{"name":"%[1]s-1","role":"replica","state":"streaming","lag":0},
+			{"name":"%[1]s-2","role":"leader","state":"running"}]}`
+		reconcileOnce(r, name)
+		Expect(proxyEnv()).To(HaveKeyWithValue("HOST", "203.0.113.3"))
+		Expect(proxyEnv()).To(HaveKeyWithValue("PRIMARY", name+"-2"))
 	})
 
 	It("rejects an even number of replicas", func() {

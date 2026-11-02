@@ -255,3 +255,30 @@ func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return lines[len(lines)-1]
 }
+
+// Switchover asks Patroni, through via's REST API, to move the primary from
+// leader to candidate. Patroni refuses a candidate that is not caught up.
+func Switchover(ctx context.Context, ex Executor, via *Node, leader, candidate string) error {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	body, err := json.Marshal(map[string]string{"leader": leader, "candidate": candidate})
+	if err != nil {
+		return err
+	}
+	cmd := fmt.Sprintf("curl -s --max-time 60 -w '\\n%%{http_code}' -X POST -H 'Content-Type: application/json' -d '%s' http://%s:%d/switchover",
+		body, via.PrivateIP, PatroniAPIPort)
+	out, err := ex.Run(ctx, via, cmd, nil)
+	if err != nil {
+		return err
+	}
+	// curl prints the HTTP status code on the last line.
+	out = strings.TrimSpace(out)
+	msg, code := "", out
+	if i := strings.LastIndex(out, "\n"); i >= 0 {
+		msg, code = out[:i], out[i+1:]
+	}
+	if code != "200" {
+		return fmt.Errorf("patroni refused the switchover from %s to %s (HTTP %s): %s", leader, candidate, code, msg)
+	}
+	return nil
+}

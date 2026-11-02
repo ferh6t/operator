@@ -207,6 +207,25 @@ undeploypg: kustomize ## Delete every PostgresCluster and Droplet with their Dig
 	fi
 	$(MAKE) undeploy ignore-not-found=true
 
+.PHONY: scale
+scale: ## Change the number of members of a Running PostgresCluster. REPLICAS=5 (odd, 1-7), CLUSTER=pg, NAMESPACE=default.
+	@test -n "$(REPLICAS)" || { echo "Set REPLICAS, e.g. make scale REPLICAS=5"; exit 1; }
+	@ns="$(or $(NAMESPACE),default)"; name="$(or $(CLUSTER),pg)"; \
+	phase=$$("$(KUBECTL)" -n "$$ns" get postgrescluster "$$name" -o jsonpath='{.status.phase}') || exit 1; \
+	[ "$$phase" = Running ] || { echo "$$ns/$$name is $$phase: scale it only while it is Running"; exit 1; }; \
+	"$(KUBECTL)" -n "$$ns" patch postgrescluster "$$name" --type=merge -p '{"spec":{"replicas":$(REPLICAS)}}' && \
+	echo "Scaling $$ns/$$name to $(REPLICAS) members. Watch it with: kubectl -n $$ns get pgc $$name -w"
+
+.PHONY: db-forward
+db-forward: ## Make the primary of a PostgresCluster reachable on localhost (pgAdmin, psql). CLUSTER=pg, NAMESPACE=default, PORT=15432.
+	@ns="$(or $(NAMESPACE),default)"; name="$(or $(CLUSTER),pg)"; port="$(or $(PORT),15432)"; \
+	"$(KUBECTL)" -n "$$ns" rollout status deploy/"$$name"-primary-proxy --timeout=120s >/dev/null || \
+		{ echo "The primary proxy of $$ns/$$name is not ready: is the cluster Running?"; exit 1; }; \
+	echo "PostgreSQL primary of $$ns/$$name on localhost:$$port (user postgres). Password:"; \
+	echo "  kubectl -n $$ns get secret $$name-credentials -o jsonpath='{.data.password}' | base64 -d"; \
+	echo "Press Ctrl+C to stop. After a failover, run this again."; \
+	"$(KUBECTL)" -n "$$ns" port-forward --address 127.0.0.1 svc/"$$name"-primary "$$port":5432
+
 .PHONY: switchover
 switchover: ## Move the primary of a PostgresCluster to another member. CLUSTER=pg (default), CANDIDATE=pg-2 (default: Patroni picks), CHECK_ONLY=1 to only show the cluster.
 	@CHECK_ONLY="$(CHECK_ONLY)" KUBECTL="$(KUBECTL)" hack/switchover.sh "$(or $(CLUSTER),pg)" "$(CANDIDATE)"

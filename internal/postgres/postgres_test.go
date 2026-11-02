@@ -241,6 +241,42 @@ func TestEtcdHealthNeedsAnAnswer(t *testing.T) {
 	}
 }
 
+// replyExecutor answers every command with reply.
+type replyExecutor struct{ reply string }
+
+func (e replyExecutor) Run(context.Context, *Node, string, []byte) (string, error) {
+	return e.reply, nil
+}
+
+func TestEtcdClusterHealth(t *testing.T) {
+	ex := replyExecutor{reply: `{"level":"warn","msg":"retrying of unary invoker failed"}
+http://10.0.0.1:2379 is healthy: successfully committed proposal: took = 2ms
+http://10.0.0.3:2379 is unhealthy: failed to commit proposal: context deadline exceeded
+Error: unhealthy cluster`}
+	h, err := EtcdClusterHealth(context.Background(), ex, &Node{Name: "pg-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h) != 2 || !h["http://10.0.0.1:2379"] || h["http://10.0.0.3:2379"] {
+		t.Errorf("health = %v", h)
+	}
+	m := EtcdMember{ClientURLs: []string{"http://10.0.0.1:2379"}}
+	if !MemberHealthy(m, h) {
+		t.Errorf("pg-0 should be healthy")
+	}
+}
+
+func TestSwitchoverRefused(t *testing.T) {
+	ex := replyExecutor{reply: "candidate name does not match with sync_standby\n412"}
+	err := Switchover(context.Background(), ex, &Node{Name: "pg-1", PrivateIP: "10.0.0.2"}, "pg-2", "pg-0")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 412") || !strings.Contains(err.Error(), "sync_standby") {
+		t.Errorf("err = %v, want the refusal with its code and reason", err)
+	}
+	if err := Switchover(context.Background(), replyExecutor{reply: "Successfully switched over\n200"}, &Node{}, "a", "b"); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestParseClusterStatus(t *testing.T) {
 	body := `{"members":[
 		{"name":"pg-0","role":"leader","state":"running","lag":0},

@@ -219,7 +219,7 @@ function renderDetail(list) {
     ${s.userData ? `<div><div class="muted" style="margin-bottom:6px">userData</div><pre>${esc(s.userData)}</pre></div>` : ""}`;
 }
 
-const PHASE_CLS = { Running: "ok", Degraded: "bad", Provisioning: "warn", Installing: "warn", Bootstrapping: "warn" };
+const PHASE_CLS = { Running: "ok", Degraded: "bad", Provisioning: "warn", Installing: "warn", Bootstrapping: "warn", Scaling: "warn" };
 
 function bytes(n) {
   if (n == null) return '<span class="muted">–</span>';

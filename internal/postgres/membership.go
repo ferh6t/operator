@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Values for Cluster.EtcdState.
@@ -35,9 +36,10 @@ const (
 
 // EtcdMember is one entry of `etcdctl member list`.
 type EtcdMember struct {
-	ID       uint64   `json:"ID"`
-	Name     string   `json:"name"`
-	PeerURLs []string `json:"peerURLs"`
+	ID         uint64   `json:"ID"`
+	Name       string   `json:"name"`
+	PeerURLs   []string `json:"peerURLs"`
+	ClientURLs []string `json:"clientURLs,omitempty"`
 }
 
 // HexID is the ID as etcdctl expects it in `member remove`.
@@ -119,6 +121,13 @@ func Registered(members []EtcdMember, nodes []Node) []Node {
 	return out
 }
 
+// ListEtcdMembers runs `etcdctl member list` on via.
+func ListEtcdMembers(ctx context.Context, ex Executor, via *Node) ([]EtcdMember, error) {
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	return listEtcdMembers(ctx, ex, via)
+}
+
 // listEtcdMembers runs `etcdctl member list` on via.
 func listEtcdMembers(ctx context.Context, ex Executor, via *Node) ([]EtcdMember, error) {
 	out, err := ex.Run(ctx, via, "ETCDCTL_API=3 etcdctl --command-timeout=5s member list -w json", nil)
@@ -162,4 +171,43 @@ func ReconcileEtcdMembers(ctx context.Context, ex Executor, via *Node, nodes []N
 	}
 	members, err = listEtcdMembers(ctx, ex, via)
 	return members, changes, err
+}
+
+// EtcdClusterHealth asks, from via, every registered etcd member whether it
+// is healthy, and returns the answer by client URL. Unlike EtcdHealth it also
+// covers members that are not current nodes, such as one being removed.
+func EtcdClusterHealth(ctx context.Context, ex Executor, via *Node) (map[string]bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	out, err := ex.Run(ctx, via, "ETCDCTL_API=3 etcdctl --command-timeout=5s endpoint health --cluster 2>&1 || true", nil)
+	if err != nil {
+		return nil, err
+	}
+	health := map[string]bool{}
+	for line := range strings.SplitSeq(out, "\n") {
+		url, rest, ok := strings.Cut(strings.TrimSpace(line), " is ")
+		if !ok || !strings.HasPrefix(url, "http") {
+			continue
+		}
+		health[url] = strings.HasPrefix(rest, "healthy")
+	}
+	if len(health) == 0 {
+		return nil, fmt.Errorf("etcdctl on %s gave no health answer: %s", via.Name, lastLine(out))
+	}
+	return health, nil
+}
+
+// MemberHealthy reports whether any client URL of m is healthy in health.
+func MemberHealthy(m EtcdMember, health map[string]bool) bool {
+	return slices.ContainsFunc(m.ClientURLs, func(u string) bool { return health[u] })
+}
+
+// RemoveEtcdMember removes one member, running etcdctl on via.
+func RemoveEtcdMember(ctx context.Context, ex Executor, via *Node, m EtcdMember) error {
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	if _, err := ex.Run(ctx, via, "ETCDCTL_API=3 etcdctl --command-timeout=5s member remove "+m.HexID(), nil); err != nil {
+		return fmt.Errorf("removing etcd member %s (%s): %w", m.Name, m.HexID(), err)
+	}
+	return nil
 }

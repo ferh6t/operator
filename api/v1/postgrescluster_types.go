@@ -31,6 +31,7 @@ const (
 	PostgresPhaseInstalling    = "Installing"
 	PostgresPhaseBootstrapping = "Bootstrapping"
 	PostgresPhaseRunning       = "Running"
+	PostgresPhaseScaling       = "Scaling"
 	PostgresPhaseDegraded      = "Degraded"
 )
 
@@ -39,14 +40,14 @@ const (
 // the etcd members form one cluster, and Patroni uses it to elect the primary.
 type PostgresClusterSpec struct {
 	// replicas is the number of Droplets (cluster members). It must be odd so
-	// etcd keeps a quorum when one member is down. It cannot be changed after
-	// creation.
+	// etcd keeps a quorum when one member is down. Change it only while the
+	// cluster is Running: new members are added one at a time, and removed
+	// members go highest number first, after the primary has moved away.
 	// +optional
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=7
 	// +kubebuilder:validation:XValidation:rule="self % 2 == 1",message="replicas must be odd so etcd keeps a quorum"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="replicas is immutable"
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// postgresVersion is the PostgreSQL major version to install.
@@ -120,7 +121,7 @@ type PostgresMember struct {
 // PostgresClusterStatus defines the observed state of PostgresCluster.
 type PostgresClusterStatus struct {
 	// phase is a short summary: Provisioning, Installing, Bootstrapping,
-	// Running or Degraded.
+	// Running, Scaling or Degraded.
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -131,6 +132,11 @@ type PostgresClusterStatus struct {
 	// readyMembers is the number of members PostgreSQL reports as running.
 	// +optional
 	ReadyMembers int32 `json:"readyMembers"`
+
+	// runningReplicas is spec.replicas the last time every member was
+	// running. While it differs from spec.replicas the cluster is scaling.
+	// +optional
+	RunningReplicas int32 `json:"runningReplicas,omitempty"`
 
 	// members of the cluster.
 	// +optional
@@ -167,6 +173,7 @@ type PostgresClusterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.readyMembers
 // +kubebuilder:resource:scope=Namespaced,shortName=pgc
 // +kubebuilder:printcolumn:name="Members",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyMembers`

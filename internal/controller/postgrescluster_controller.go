@@ -27,12 +27,14 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -80,6 +82,8 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=postgresclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=webapp.ferh6t.github.io,resources=droplets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile moves a PostgresCluster one step closer to a running cluster.
 // Each step is checked on every call, so it picks up where it left off.
@@ -173,10 +177,190 @@ func (r *PostgresClusterReconciler) reconcile(ctx context.Context, req ctrl.Requ
 	}
 	applyView(pg, nodes, view)
 
+	// Keep the proxy on the primary just found, even while the rest of this
+	// reconcile is busy with scaling or a replaced member.
+	if err := r.ensurePrimaryProxy(ctx, pg); err != nil {
+		l.Error(err, "Failed to reconcile primary proxy")
+	}
+
+	// Members above spec.replicas leave first, one per reconcile.
+	if stop, res, err := r.scaleDown(ctx, pg, nodes, ex); stop {
+		return res, err
+	}
+
 	if waiting != "" {
 		return r.progress(ctx, pg, nodes, webappv1.PostgresPhaseProvisioning, "WaitingForDroplets", waiting, pgWaitInterval)
 	}
 	return r.bootstrap(ctx, pg, nodes, cluster, ex, view)
+}
+
+// scaleDown removes the highest-numbered member above spec.replicas. It does
+// one thing per call and returns stop=true until no such member is left:
+//  1. if the member is the primary, Patroni moves the primary to the most
+//     caught-up remaining replica;
+//  2. the member is removed from etcd, if the rest keep a quorum;
+//  3. its Droplet is deleted, and the Droplet finalizer deletes the server.
+func (r *PostgresClusterReconciler) scaleDown(ctx context.Context, pg *webappv1.PostgresCluster, nodes []*postgres.Node, ex postgres.Executor) (bool, ctrl.Result, error) {
+	l := logf.FromContext(ctx)
+	extras, err := r.extraDroplets(ctx, pg)
+	if err != nil || len(extras) == 0 {
+		return err != nil, ctrl.Result{}, err
+	}
+	d := extras[0]
+	wait := func(msg string) (bool, ctrl.Result, error) {
+		res, err := r.progress(ctx, pg, nodes, webappv1.PostgresPhaseScaling, "ScalingDown", msg, pgStepInterval)
+		return true, res, err
+	}
+	if !d.DeletionTimestamp.IsZero() {
+		return wait(fmt.Sprintf("Waiting for Droplet %s to be deleted", d.Name))
+	}
+	if !wasRunning(pg) {
+		// Nothing runs on it yet, so there is nothing to hand over.
+		return r.deleteMember(ctx, pg, nodes, d, "")
+	}
+
+	var via *postgres.Node
+	for _, n := range orderByHealth(pg, nodes) {
+		if isEtcdHealthy(pg, n.Name) {
+			via = n
+			break
+		}
+	}
+	if via == nil {
+		return wait(fmt.Sprintf("No healthy remaining member to remove %s through", d.Name))
+	}
+
+	// 1. Never remove the primary: move it to a remaining member first.
+	members, err := postgres.ClusterStatus(ctx, ex, via)
+	if err != nil {
+		return wait(fmt.Sprintf("Waiting for Patroni before removing %s: %v", d.Name, err))
+	}
+	leader := ""
+	for _, m := range members {
+		if postgres.IsLeader(m.Role) {
+			leader = m.Name
+		}
+	}
+	if leader == "" {
+		return wait(fmt.Sprintf("Waiting for a primary before removing %s", d.Name))
+	}
+	if leader == d.Name {
+		candidate := switchoverCandidate(members, nodes)
+		if candidate == "" {
+			return wait(fmt.Sprintf("%s is the primary and no remaining replica is caught up to take over", d.Name))
+		}
+		if err := postgres.Switchover(ctx, ex, via, leader, candidate); err != nil {
+			return wait(err.Error())
+		}
+		l.Info("Moved the primary before removing member", "from", leader, "to", candidate)
+		return wait(fmt.Sprintf("Moved the primary from %s to %s before removing %s", leader, candidate, d.Name))
+	}
+
+	// 2. Remove it from etcd while the rest keep a quorum.
+	etcdMembers, err := postgres.ListEtcdMembers(ctx, ex, via)
+	if err != nil {
+		return wait(fmt.Sprintf("Could not list etcd members: %v", err))
+	}
+	health, err := postgres.EtcdClusterHealth(ctx, ex, via)
+	if err != nil {
+		return wait(fmt.Sprintf("Could not check etcd health: %v", err))
+	}
+	peer := ""
+	if d.Status.PrivateIPv4 != "" {
+		peer = postgres.PeerURL(postgres.Node{PrivateIP: d.Status.PrivateIPv4})
+	}
+	idx := slices.IndexFunc(etcdMembers, func(m postgres.EtcdMember) bool {
+		return m.Name == d.Name || (peer != "" && slices.Contains(m.PeerURLs, peer))
+	})
+	if idx >= 0 {
+		target := etcdMembers[idx]
+		rest := slices.Delete(slices.Clone(etcdMembers), idx, idx+1)
+		up := 0
+		for _, m := range rest {
+			if postgres.MemberHealthy(m, health) {
+				up++
+			}
+		}
+		if up <= len(rest)/2 {
+			return wait(fmt.Sprintf("Removing %s now would leave etcd without a quorum (%d of %d remaining members healthy)", d.Name, up, len(rest)))
+		}
+		if err := postgres.RemoveEtcdMember(ctx, ex, via, target); err != nil {
+			return wait(err.Error())
+		}
+		l.Info("Removed etcd member", "member", d.Name, "via", via.Name)
+	}
+
+	// 3. Delete the Droplet.
+	return r.deleteMember(ctx, pg, nodes, d, " after removing it from etcd")
+}
+
+// deleteMember deletes a member's Droplet; its finalizer deletes the server.
+func (r *PostgresClusterReconciler) deleteMember(ctx context.Context, pg *webappv1.PostgresCluster, nodes []*postgres.Node, d *webappv1.Droplet, how string) (bool, ctrl.Result, error) {
+	if err := r.Delete(ctx, d); client.IgnoreNotFound(err) != nil {
+		return true, ctrl.Result{}, err
+	}
+	logf.FromContext(ctx).Info("Deleted Droplet to scale down", "name", d.Name)
+	res, err := r.progress(ctx, pg, nodes, webappv1.PostgresPhaseScaling, "ScalingDown",
+		fmt.Sprintf("Deleting Droplet %s%s", d.Name, how), pgStepInterval)
+	return true, res, err
+}
+
+// extraDroplets returns the cluster's Droplets above spec.replicas, highest
+// number first.
+func (r *PostgresClusterReconciler) extraDroplets(ctx context.Context, pg *webappv1.PostgresCluster) ([]*webappv1.Droplet, error) {
+	list := &webappv1.DropletList{}
+	if err := r.List(ctx, list, client.InNamespace(pg.Namespace), client.MatchingLabels{webappv1.PostgresClusterLabel: pg.Name}); err != nil {
+		return nil, err
+	}
+	var extras []*webappv1.Droplet
+	for i := range list.Items {
+		d := &list.Items[i]
+		if metav1.IsControlledBy(d, pg) && memberIndex(pg.Name, d.Name) >= int(pg.Spec.Replicas) {
+			extras = append(extras, d)
+		}
+	}
+	slices.SortFunc(extras, func(a, b *webappv1.Droplet) int {
+		return memberIndex(pg.Name, b.Name) - memberIndex(pg.Name, a.Name)
+	})
+	return extras, nil
+}
+
+// memberIndex returns the index in a member name like pg-2. A name that is
+// not <cluster>-<index> gets a high index, so it is removed.
+func memberIndex(cluster, name string) int {
+	var i int
+	if _, err := fmt.Sscanf(name, cluster+"-%d", &i); err != nil || name != fmt.Sprintf("%s-%d", cluster, i) {
+		return 1 << 20
+	}
+	return i
+}
+
+// switchoverCandidate picks the remaining member that is running and has the
+// least replication lag, or "" when none is.
+func switchoverCandidate(members []postgres.PatroniMember, nodes []*postgres.Node) string {
+	best, bestLag := "", int64(-1)
+	for _, m := range members {
+		if postgres.IsLeader(m.Role) || !postgres.IsHealthy(m.State) {
+			continue
+		}
+		if !slices.ContainsFunc(nodes, func(n *postgres.Node) bool { return n.Name == m.Name }) {
+			continue
+		}
+		lag := int64(1 << 62)
+		if m.Lag != nil {
+			lag = *m.Lag
+		}
+		if best == "" || lag < bestLag {
+			best, bestLag = m.Name, lag
+		}
+	}
+	return best
+}
+
+// scaling reports whether spec.replicas differs from what the cluster last
+// ran with, so missing or extra members are expected rather than an outage.
+func scaling(pg *webappv1.PostgresCluster) bool {
+	return wasRunning(pg) && pg.Status.RunningReplicas != 0 && pg.Status.RunningReplicas != pg.Spec.Replicas
 }
 
 // bootstrap runs the steps that need SSH: install, fix etcd membership,
@@ -257,11 +441,11 @@ func (r *PostgresClusterReconciler) bootstrap(ctx context.Context, pg *webappv1.
 			fmt.Sprintf("%d of %d etcd members healthy", up, len(nodes)), pgStepInterval)
 	}
 
-	// 6. Start Patroni everywhere. The first member to take the leader lock
-	// creates the database; the others clone it from the leader. Once the
-	// cluster has run, a member that cannot be reached shows up in the
-	// Patroni status below instead of hiding it.
-	for _, n := range nodes {
+	// 6. Start Patroni on every configured member. The first member to take
+	// the leader lock creates the database; the others clone it from the
+	// leader. Once the cluster has run, a member that cannot be reached shows
+	// up in the Patroni status below instead of hiding it.
+	for _, n := range etcdNodes {
 		if err := postgres.StartPatroni(ctx, ex, n); err != nil {
 			if !wasRunning(pg) || errors.Is(err, postgres.ErrHostKeyMismatch) {
 				return r.sshFailed(ctx, pg, nodes, webappv1.PostgresPhaseBootstrapping, err)
@@ -541,6 +725,13 @@ func (r *PostgresClusterReconciler) reportCluster(ctx context.Context, pg *webap
 		setPGCondition(pg, "Progressing", metav1.ConditionFalse, "Running", msg)
 		setPGCondition(pg, "Initialized", metav1.ConditionTrue, "Bootstrapped", "Every member has been running at least once")
 		meta.RemoveStatusCondition(&pg.Status.Conditions, "Degraded")
+		pg.Status.RunningReplicas = pg.Spec.Replicas
+	} else if scaling(pg) && primary != "" {
+		// New members are still joining; the database keeps serving.
+		pg.Status.Phase = webappv1.PostgresPhaseScaling
+		setPGCondition(pg, "Available", metav1.ConditionTrue, "Scaling", msg)
+		setPGCondition(pg, "Progressing", metav1.ConditionTrue, "Scaling", msg)
+		meta.RemoveStatusCondition(&pg.Status.Conditions, "Degraded")
 	} else if wasRunning(pg) {
 		pg.Status.Phase = webappv1.PostgresPhaseDegraded
 		setPGCondition(pg, "Available", metav1.ConditionFalse, "Degraded", msg)
@@ -550,7 +741,14 @@ func (r *PostgresClusterReconciler) reportCluster(ctx context.Context, pg *webap
 		setPGCondition(pg, "Available", metav1.ConditionFalse, "Bootstrapping", msg)
 		setPGCondition(pg, "Progressing", metav1.ConditionTrue, "Bootstrapping", msg)
 	}
-	return ctrl.Result{RequeueAfter: pgHealthInterval}, r.writeStatus(ctx, pg)
+	if err := r.writeStatus(ctx, pg); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.ensurePrimaryProxy(ctx, pg); err != nil {
+		logf.FromContext(ctx).Error(err, "Failed to reconcile primary proxy")
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: pgHealthInterval}, nil
 }
 
 // wasRunning reports whether the cluster has been fully up before, so a
@@ -738,6 +936,12 @@ func (r *PostgresClusterReconciler) executor(signer ssh.Signer) postgres.Executo
 // run, that it is degraded, and checks again later.
 func (r *PostgresClusterReconciler) progress(ctx context.Context, pg *webappv1.PostgresCluster, nodes []*postgres.Node, phase, reason, msg string, after time.Duration) (ctrl.Result, error) {
 	syncHostKeys(pg, nodes)
+	if scaling(pg) && phase != webappv1.PostgresPhaseDegraded {
+		// Adding or removing members: the database keeps serving.
+		pg.Status.Phase = webappv1.PostgresPhaseScaling
+		setPGCondition(pg, "Progressing", metav1.ConditionTrue, reason, msg)
+		return ctrl.Result{RequeueAfter: after}, r.writeStatus(ctx, pg)
+	}
 	setPGCondition(pg, "Available", metav1.ConditionFalse, reason, msg)
 	if wasRunning(pg) {
 		// It was up before, so this is an outage, not setup.
@@ -805,13 +1009,18 @@ func syncHostKeys(pg *webappv1.PostgresCluster, nodes []*postgres.Node) {
 
 // writeStatus saves status on top of the latest version of the object.
 func (r *PostgresClusterReconciler) writeStatus(ctx context.Context, pg *webappv1.PostgresCluster) error {
-	latest := &webappv1.PostgresCluster{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(pg), latest); err != nil {
-		return client.IgnoreNotFound(err)
-	}
 	pg.Status.ObservedGeneration = pg.Generation
-	latest.Status = pg.Status
-	if err := r.Status().Update(ctx, latest); err != nil {
+	// Another write may land between reading and updating; status is all
+	// this reconcile's own view, so read again and retry.
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &webappv1.PostgresCluster{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(pg), latest); err != nil {
+			return err
+		}
+		latest.Status = pg.Status
+		return r.Status().Update(ctx, latest)
+	})
+	if client.IgnoreNotFound(err) != nil {
 		logf.FromContext(ctx).Error(err, "Failed to update PostgresCluster status")
 		return err
 	}
@@ -857,6 +1066,8 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&webappv1.PostgresCluster{}).
 		Owns(&webappv1.Droplet{}).
 		Owns(&corev1.Secret{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Named("postgrescluster").
 		Complete(r)
 }

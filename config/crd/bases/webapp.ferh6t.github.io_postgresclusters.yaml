@@ -183,8 +183,9 @@ spec:
                 default: 3
                 description: |-
                   replicas is the number of Droplets (cluster members). It must be odd so
-                  etcd keeps a quorum when one member is down. It cannot be changed after
-                  creation.
+                  etcd keeps a quorum when one member is down. Change it only while the
+                  cluster is Running: new members are added one at a time, and removed
+                  members go highest number first, after the primary has moved away.
                 format: int32
                 maximum: 7
                 minimum: 1
@@ -192,8 +193,6 @@ spec:
                 x-kubernetes-validations:
                 - message: replicas must be odd so etcd keeps a quorum
                   rule: self % 2 == 1
-                - message: replicas is immutable
-                  rule: self == oldSelf
             required:
             - droplet
             type: object
@@ -334,7 +333,7 @@ spec:
               phase:
                 description: |-
                   phase is a short summary: Provisioning, Installing, Bootstrapping,
-                  Running or Degraded.
+                  Running, Scaling or Degraded.
                 type: string
               primary:
                 description: primary is the name of the member that currently accepts
@@ -343,6 +342,12 @@ spec:
               readyMembers:
                 description: readyMembers is the number of members PostgreSQL reports
                   as running.
+                format: int32
+                type: integer
+              runningReplicas:
+                description: |-
+                  runningReplicas is spec.replicas the last time every member was
+                  running. While it differs from spec.replicas the cluster is scaling.
                 format: int32
                 type: integer
               sshSecret:
@@ -357,4 +362,7 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.readyMembers
       status: {}
