@@ -207,6 +207,10 @@ undeploypg: kustomize ## Delete every PostgresCluster and Droplet with their Dig
 	fi
 	$(MAKE) undeploy ignore-not-found=true
 
+.PHONY: switchover
+switchover: ## Move the primary of a PostgresCluster to another member. CLUSTER=pg (default), CANDIDATE=pg-2 (default: Patroni picks), CHECK_ONLY=1 to only show the cluster.
+	@CHECK_ONLY="$(CHECK_ONLY)" KUBECTL="$(KUBECTL)" hack/switchover.sh "$(or $(CLUSTER),pg)" "$(CANDIDATE)"
+
 .PHONY: apply-postgrescluster-sample
 apply-postgrescluster-sample: ## Create the DigitalOcean token Secret and apply the PostgresCluster sample using values from .env.
 	@test -f .env || { echo ".env not found; run: cp .env.example .env"; exit 1; }
