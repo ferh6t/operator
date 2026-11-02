@@ -224,7 +224,7 @@ db-forward: ## Make the primary of a PostgresCluster reachable on localhost (pgA
 	echo "PostgreSQL primary of $$ns/$$name on localhost:$$port (user postgres). Password:"; \
 	echo "  kubectl -n $$ns get secret $$name-credentials -o jsonpath='{.data.password}' | base64 -d"; \
 	echo "Press Ctrl+C to stop. After a failover, run this again."; \
-	"$(KUBECTL)" -n "$$ns" port-forward --address 127.0.0.1 svc/"$$name"-primary "$$port":5432
+	"$(KUBECTL)" -n "$$ns" port-forward --address 127.0.0.1,::1 svc/"$$name"-primary "$$port":5432
 
 .PHONY: switchover
 switchover: ## Move the primary of a PostgresCluster to another member. CLUSTER=pg (default), CANDIDATE=pg-2 (default: Patroni picks), CHECK_ONLY=1 to only show the cluster.
