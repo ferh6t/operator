@@ -13,7 +13,7 @@ spec:
       app: web
     spec:
       region: fra1
-      size: s-1vcpu-1gb
+      size: s-1vcpu-1gb-intel
       image: ubuntu-24-04-x64
       # Filled from .env by `make apply-dropletset-sample`
       sshKeys: ${DO_SSH_KEYS}

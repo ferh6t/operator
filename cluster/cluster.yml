@@ -5,4 +5,9 @@ metadata:
 servers: 1
 agents: 2
 image: rancher/k3s:v1.33.3-k3s1
+ports:
+  # Dashboard: http://localhost:8082 (Service operator-controller-manager-ui-service)
+  - port: 8082:8082
+    nodeFilters:
+      - loadbalancer
 

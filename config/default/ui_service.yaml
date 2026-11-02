@@ -1,0 +1,23 @@
+# Exposes the dashboard (--ui-bind-address, default :8082).
+# On k3d, k3s exposes LoadBalancer Services on every node, so mapping host port
+# 8082 to the k3d load balancer (see cluster/cluster.yml) makes it reachable at
+# http://localhost:8082.
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: controller-manager-ui-service
+  namespace: system
+spec:
+  type: LoadBalancer
+  ports:
+  - name: ui
+    port: 8082
+    protocol: TCP
+    targetPort: ui
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: operator
